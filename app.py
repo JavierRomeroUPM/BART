@@ -1,141 +1,121 @@
-{
- "cells": [
-  {
-   "cell_type": "code",
-   "execution_count": null,
-   "id": "334c45a5-3ee4-4da4-8b27-38b96abf2672",
-   "metadata": {},
-   "outputs": [],
-   "source": [
-    "import streamlit as st\n",
-    "import pandas as pd\n",
-    "import numpy as np\n",
-    "import pickle\n",
-    "from datetime import datetime\n",
-    "\n",
-    "# ==============================================================================\n",
-    "# 1. CARGA DE ACTIVOS Y FUNCIONES\n",
-    "# ==============================================================================\n",
-    "st.set_page_config(page_title=\"Simulador Ph Geotécnico - BART\", layout=\"wide\")\n",
-    "\n",
-    "@st.cache_resource\n",
-    "def load_bart_model():\n",
-    "    try:\n",
-    "        with open(\"modelo_bart_final.pkl\", \"rb\") as f:\n",
-    "            return pickle.load(f)\n",
-    "    except Exception as e:\n",
-    "        st.error(f\"Error al cargar el modelo: {e}\")\n",
-    "        st.stop()\n",
-    "\n",
-    "assets = load_bart_model()\n",
-    "modelos_ensemble = assets['modelo']\n",
-    "metodo = assets['metodo']\n",
-    "v_disc = assets['valores_disc']\n",
-    "\n",
-    "def predict_with_uncertainty(x_input, model_list):\n",
-    "    # Predicción logarítmica de cada árbol del ensamble\n",
-    "    preds_log = np.array([m.predict(x_input) for m in model_list])\n",
-    "    m_log = np.mean(preds_log, axis=0)\n",
-    "    s_log = np.std(preds_log, axis=0)\n",
-    "    \n",
-    "    # Revertir logaritmo\n",
-    "    ph_mean = np.expm1(m_log)[0]\n",
-    "    # Intervalo de confianza (95%)\n",
-    "    low_ph = np.expm1(m_log - 1.96 * s_log)[0]\n",
-    "    high_ph = np.expm1(m_log + 1.96 * s_log)[0]\n",
-    "    \n",
-    "    return ph_mean, low_ph, high_ph, s_log[0]\n",
-    "\n",
-    "# ==============================================================================\n",
-    "# 2. INTERFAZ\n",
-    "# ==============================================================================\n",
-    "st.title(\"🎯 Predictor de Presión de Hundimiento (Ph)\")\n",
-    "st.subheader(\"Metamodelo de Alta Fidelidad mediante BART-Ensemble\")\n",
-    "\n",
-    "if \"hist\" not in st.session_state: st.session_state.hist = []\n",
-    "\n",
-    "with st.form(\"input_form\"):\n",
-    "    c1, c2 = st.columns(2)\n",
-    "    with c1:\n",
-    "        st.info(\"🧪 Parámetros del Macizo (Analíticos)\")\n",
-    "        ucs = st.number_input(\"UCS (MPa)\", 5.0, 110.0, 50.0, step=0.1)\n",
-    "        gsi = st.number_input(\"GSI\", 5.0, 100.0, 50.0, step=0.1)\n",
-    "        mo = st.number_input(\"mo (Hoek-Brown)\", 5.0, 32.0, 20.0, step=0.1)\n",
-    "    with c2:\n",
-    "        st.info(\"⚙️ Geometría y Condiciones (No Analíticos)\")\n",
-    "        b = st.number_input(\"Ancho B (m)\", 1.0, 40.0, 11.0, step=0.1)\n",
-    "        v_pp = st.selectbox(\"Peso Propio\", [\"Sin Peso\", \"Con Peso\"])\n",
-    "        v_dil = st.selectbox(\"Dilatancia\", [\"Nulo\", \"Asociada\"], index=1)\n",
-    "        v_for = st.selectbox(\"Forma\", [\"Plana\", \"Axisimétrica\"], index=1)\n",
-    "        v_rug = st.selectbox(\"Rugosidad\", [\"Sin Rugosidad\", \"Rugoso\"], index=0)\n",
-    "\n",
-    "    calculate = st.form_submit_button(\"EJECUTAR PREDICCIÓN\", use_container_width=True)\n",
-    "\n",
-    "if calculate:\n",
-    "    # Mapeo\n",
-    "    vec = [[mo, b, ucs, gsi, 1 if v_pp==\"Con Peso\" else 0, 1 if v_dil==\"Asociada\" else 0, \n",
-    "            1 if v_for==\"Axisimétrica\" else 0, 1 if v_rug==\"Rugoso\" else 0]]\n",
-    "    \n",
-    "    ph, low, high, sigma = predict_with_uncertainty(np.array(vec), modelos_ensemble)\n",
-    "    \n",
-    "    # ZONA DE RESULTADOS\n",
-    "    st.divider()\n",
-    "    res1, res2 = st.columns([2, 1])\n",
-    "    \n",
-    "    with res1:\n",
-    "        st.success(f\"### Presión de Hundimiento Predicha: **{ph:.3f} MPa**\")\n",
-    "        st.write(f\"Intervalo de Confianza (95%): **[{low:.2f} - {high:.2f}] MPa**\")\n",
-    "        \n",
-    "        # Alerta de Extrapolación\n",
-    "        fuera_rango = (ucs > 100 or gsi > 85 or gsi < 10 or b > 22 or b < 4.5)\n",
-    "        if fuera_rango:\n",
-    "            st.warning(\"⚠️ **AVISO DE EXTRAPOLACIÓN:** Los valores introducidos exceden ligeramente el rango de entrenamiento. La incertidumbre puede ser mayor.\")\n",
-    "\n",
-    "    with res2:\n",
-    "        # Indicador visual de confianza\n",
-    "        # Un sigma bajo indica alta confianza. Umbral arbitrario para visualización.\n",
-    "        conf = max(0, 100 - (sigma * 100))\n",
-    "        st.metric(\"Índice de Confianza\", f\"{conf:.1f}%\")\n",
-    "        st.progress(conf/100)\n",
-    "\n",
-    "    # Historial\n",
-    "    st.session_state.hist.insert(0, {\n",
-    "        \"UCS\": ucs, \"GSI\": gsi, \"mo\": mo, \"B\": b, \"Peso\": v_pp, \n",
-    "        \"Dilat.\": v_dil, \"Forma\": v_for, \"Rugos.\": v_rug, \"Ph\": round(ph, 3)\n",
-    "    })\n",
-    "\n",
-    "# Mostrar Historial\n",
-    "if st.session_state.hist:\n",
-    "    st.divider()\n",
-    "    st.subheader(\"📜 Historial de Cálculos\")\n",
-    "    st.dataframe(pd.DataFrame(st.session_state.hist), use_container_width=True, hide_index=True)\n",
-    "    if st.button(\"Limpiar Historial\"): \n",
-    "        st.session_state.hist = []; st.rerun()\n",
-    "\n",
-    "st.divider()\n",
-    "st.caption(\"Arquitectura: Ensemble de Árboles Bayesianos (BART-Inspired) | Capacidad de Extrapolación Moderada Habilitada\")"
-   ]
-  }
- ],
- "metadata": {
-  "kernelspec": {
-   "display_name": "Python 3 (ipykernel)",
-   "language": "python",
-   "name": "python3"
-  },
-  "language_info": {
-   "codemirror_mode": {
-    "name": "ipython",
-    "version": 3
-   },
-   "file_extension": ".py",
-   "mimetype": "text/x-python",
-   "name": "python",
-   "nbconvert_exporter": "python",
-   "pygments_lexer": "ipython3",
-   "version": "3.12.11"
-  }
- },
- "nbformat": 4,
- "nbformat_minor": 5
-}
+import streamlit as st
+import pandas as pd
+import numpy as np
+import pickle
+from datetime import datetime
+
+# ==============================================================================
+# 1. CARGA DE ACTIVOS Y FUNCIONES
+# ==============================================================================
+st.set_page_config(page_title="Simulador Ph Geotécnico - BART", layout="wide")
+
+@st.cache_resource
+def load_bart_model():
+    try:
+        # Asegúrate de que este nombre de archivo sea exacto al que subiste a GitHub
+        with open("modelo_bart_final.pkl", "rb") as f:
+            return pickle.load(f)
+    except Exception as e:
+        st.error(f"Error al cargar el modelo: {e}")
+        st.stop()
+
+# Carga de datos del modelo
+assets = load_bart_model()
+modelos_ensemble = assets['modelo']
+metodo = assets['metodo']
+v_disc = assets['valores_disc']
+
+def predict_with_uncertainty(x_input, model_list):
+    # Predicción logarítmica de cada árbol del ensamble
+    preds_log = np.array([m.predict(x_input) for m in model_list])
+    m_log = np.mean(preds_log, axis=0)
+    s_log = np.std(preds_log, axis=0)
+    
+    # Revertir logaritmo
+    ph_mean = np.expm1(m_log)[0]
+    # Intervalo de confianza (95%)
+    low_ph = np.expm1(m_log - 1.96 * s_log)[0]
+    high_ph = np.expm1(m_log + 1.96 * s_log)[0]
+    
+    return ph_mean, low_ph, high_ph, s_log[0]
+
+# ==============================================================================
+# 2. INTERFAZ DE USUARIO
+# ==============================================================================
+st.title("🎯 Predictor de Presión de Hundimiento (Ph)")
+st.subheader("Metamodelo de Alta Fidelidad mediante BART-Ensemble")
+
+# Inicialización del historial
+if "hist" not in st.session_state: 
+    st.session_state.hist = []
+
+with st.form("input_form"):
+    c1, c2 = st.columns(2)
+    with c1:
+        st.info("🧪 Parámetros del Macizo (Analíticos)")
+        ucs = st.number_input("UCS (MPa)", 5.0, 110.0, 50.0, step=0.1)
+        gsi = st.number_input("GSI", 5.0, 100.0, 50.0, step=0.1)
+        mo = st.number_input("mo (Hoek-Brown)", 5.0, 32.0, 20.0, step=0.1)
+    with c2:
+        st.info("⚙️ Geometría y Condiciones (No Analíticos)")
+        b = st.number_input("Ancho B (m)", 1.0, 40.0, 11.0, step=0.1)
+        v_pp = st.selectbox("Peso Propio", ["Sin Peso", "Con Peso"])
+        v_dil = st.selectbox("Dilatancia", ["Nulo", "Asociada"], index=1)
+        v_for = st.selectbox("Forma", ["Plana", "Axisimétrica"], index=1)
+        v_rug = st.selectbox("Rugosidad", ["Sin Rugosidad", "Rugoso"], index=0)
+
+    calculate = st.form_submit_button("EJECUTAR PREDICCIÓN", use_container_width=True)
+
+if calculate:
+    # Mapeo a vector numérico
+    # mo, B, UCS, GSI, Peso, Dilat, Forma, Rugos
+    vec = [[
+        mo, 
+        b, 
+        ucs, 
+        gsi, 
+        1 if v_pp == "Con Peso" else 0, 
+        1 if v_dil == "Asociada" else 0, 
+        1 if v_for == "Axisimétrica" else 0, 
+        1 if v_rug == "Rugoso" else 0
+    ]]
+    
+    ph, low, high, sigma = predict_with_uncertainty(np.array(vec), modelos_ensemble)
+    
+    # ZONA DE RESULTADOS
+    st.divider()
+    res1, res2 = st.columns([2, 1])
+    
+    with res1:
+        st.success(f"### Presión de Hundimiento Predicha: **{ph:.3f} MPa**")
+        st.write(f"Intervalo de Confianza (95%): **[{low:.2f} - {high:.2f}] MPa**")
+        
+        # Alerta de Extrapolación basada en los rangos de entrenamiento reales
+        # Ajustado a tus límites: UCS 100, GSI 85, B 22
+        fuera_rango = (ucs > 100 or gsi > 85 or gsi < 10 or b > 22 or b < 4.5)
+        if fuera_rango:
+            st.warning("⚠️ **AVISO DE EXTRAPOLACIÓN:** Los valores introducidos exceden el rango de entrenamiento. El modelo estima la tendencia, pero la incertidumbre es mayor.")
+
+    with res2:
+        # Indicador visual de confianza basado en la desviación estándar
+        conf = max(0, 100 - (sigma * 100))
+        st.metric("Índice de Fiabilidad", f"{conf:.1f}%")
+        st.progress(conf/100)
+
+    # Registro en Historial
+    st.session_state.hist.insert(0, {
+        "UCS": ucs, "GSI": gsi, "mo": mo, "B": b, "Peso": v_pp, 
+        "Dilat.": v_dil, "Forma": v_for, "Rugos.": v_rug, "Ph (MPa)": round(ph, 3)
+    })
+
+# Mostrar Historial si existe
+if st.session_state.hist:
+    st.divider()
+    st.subheader("📜 Historial de Cálculos")
+    st.dataframe(pd.DataFrame(st.session_state.hist), use_container_width=True, hide_index=True)
+    if st.button("Limpiar Historial"): 
+        st.session_state.hist = []
+        st.rerun()
+
+st.divider()
+st.caption("Arquitectura: Ensemble de Árboles Bayesianos (BART-Inspired) | Capacidad de Extrapolación Moderada Habilitada | Desarrollo para Tesis Doctoral")
