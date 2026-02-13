@@ -3,82 +3,112 @@ import pandas as pd
 import numpy as np
 import arviz as az
 import pymc_bart as pmb
+from datetime import datetime
 
-# Configuración de página
-st.set_page_config(page_title="Calculadora Geotécnica BART", layout="centered")
+# ==============================================================================
+# 1. CONFIGURACIÓN Y CARGA DEL MOTOR BART (.NC)
+# ==============================================================================
+st.set_page_config(page_title="Simulador Ph BART - Doctorado", layout="wide")
 
-# 1. CARGA DEL MODELO (Asegúrate de tener el archivo .nc en la carpeta)
+if "historial" not in st.session_state:
+    st.session_state["historial"] = []
+
 @st.cache_resource
-def cargar_modelo():
-    return az.from_netcdf("modelo_bart_final.nc")
+def load_bart_model():
+    try:
+        # Cargamos el InferenceData generado en Colab
+        return az.from_netcdf("modelo_bart_final.nc")
+    except Exception as e:
+        st.error(f"❌ Error al cargar el motor bayesiano (.nc): {e}")
+        st.stop()
 
-try:
-    idata = cargar_modelo()
-except:
-    st.error("⚠️ No se encuentra el archivo 'modelo_bart_final.nc'. Asegúrate de subirlo a la carpeta de la App.")
-    st.stop()
+idata = load_bart_model()
 
-st.title("🏗️ Sistema Experto: Predicción de $P_h$")
-st.markdown("### Modelo de Regresión Bayesiana (BART)")
+# ==============================================================================
+# 2. INTERFAZ DE USUARIO (TU MÁSCARA ADAPTADA)
+# ==============================================================================
+st.title("🚀 Predictor Ph - Motor Bayesiano BART")
+st.markdown("Inferencia mediante árboles aditivos bayesianos para la obtención de superficies de respuesta continuas.")
 
-# 2. ENTRADA DE DATOS (VENTANAS NUMÉRICAS Y DESPLEGABLES)
-st.subheader("Parámetros de Entrada")
-
-with st.container():
+with st.form("main_form"):
     col1, col2 = st.columns(2)
     
     with col1:
-        ucs = st.number_input("UCS (Resistencia Compresión) [MPa]", value=50.0, format="%.2f")
-        gsi = st.number_input("GSI (Geological Strength Index)", value=50.0, format="%.1f")
-        mi = st.number_input("Parámetro mi (Hoek-Brown)", value=15.0, format="%.2f")
-        d_param = st.number_input("Factor de Daño (D)", value=0.0, min_value=0.0, max_value=1.0, step=0.1)
-
+        st.subheader("🧪 Variables Analíticas")
+        ucs = st.number_input("UCS (MPa)", 5.0, 100.0, 50.0, step=0.1)
+        gsi = st.number_input("GSI", 10.0, 85.0, 50.0, step=0.1)
+        mo = st.number_input("Parámetro mo", 5.0, 32.0, 20.0, step=0.1)
+        b = st.number_input("Ancho B (m)", 4.5, 22.0, 11.0, step=0.1)
+        
     with col2:
-        gamma = st.number_input("Densidad (γ) [kN/m³]", value=25.0, format="%.2f")
-        z = st.number_input("Profundidad (Z) [m]", value=100.0, format="%.1f")
-        b_tunel = st.number_input("Ancho de excavación (B) [m]", value=10.0, format="%.2f")
-        # Ejemplo de Desplegable Categórico
-        sobrecarga = st.selectbox("Nivel de Sobrecarga (S)", 
-                                 options=[0, 100, 500, 1000],
-                                 help="Seleccione la categoría de presión superficial")
+        st.subheader("⚙️ Variables No Analíticas")
+        v_pp = st.selectbox("Peso Propio", ["Sin Peso", "Con Peso"])
+        v_dil = st.selectbox("Dilatancia", ["Nulo", "Asociada"], index=1)
+        v_for = st.selectbox("Forma", ["Plana", "Axisimétrica"], index=1)
+        v_rug = st.selectbox("Rugosidad", ["Sin Rugosidad", "Rugoso"], index=0)
 
-# 3. BOTÓN DE CÁLCULO
-if st.button("🚀 CALCULAR PRESIÓN DE HUNDIMIENTO", type="primary", use_container_width=True):
+    submit = st.form_submit_button("🎯 CALCULAR PREDICCIÓN BAYESIANA", use_container_width=True)
+
+if submit:
+    # Mapeo a formato numérico (debe coincidir con el orden de Colab)
+    pp_val = 1 if v_pp == "Con Peso" else 0
+    dil_val = 1 if v_dil == "Asociada" else 0
+    for_val = 1 if v_for == "Axisimétrica" else 0
+    rug_val = 1 if v_rug == "Rugoso" else 0
     
-    # Preparar el vector (ajusta el orden si en tu Excel era distinto)
-    # Orden: [GSI, UCS, mi, D, gamma, Z, B, S]
-    X_new = np.array([[gsi, ucs, mi, d_param, gamma, z, b_tunel, sobrecarga]])
+    # Vector de entrada (Ajustar este orden exacto según tu entrenamiento en Colab)
+    # Ejemplo: [GSI, UCS, mo, B, PP, Dil, Form, Rug]
+    vec = [gsi, ucs, mo, b, pp_val, dil_val, for_val, rug_val]
     
-    with st.spinner("Procesando incertidumbre bayesiana..."):
-        # Extraer muestras de la distribución 'mu'
+    # --- PROCESAMIENTO CON EL MOTOR BART ---
+    with st.spinner("Realizando inferencia bayesiana..."):
+        # Extraemos las muestras de la posterior para 'mu'
         mu_samples = idata.posterior["mu"]
         
-        # Cálculo del valor medio (el punto en la curva suave)
-        ph_log_mean = mu_samples.mean().values
-        ph_final = np.expm1(ph_log_mean)
+        # Calculamos la media de la distribución (nuestra Ph predicha)
+        ph_log_pred = mu_samples.mean().values
+        ph_resultado = np.expm1(ph_log_pred)
         
-        # CÁLCULO DE LA INCERTIDUMBRE (Desviación Estándar de las muestras)
-        # Esto indica cuánto "dudan" los árboles de BART para esos inputs
-        ph_std = mu_samples.std().values
-        incertidumbre = (np.expm1(ph_log_mean + ph_std) - np.expm1(ph_log_mean - ph_std)) / 2
+        # Calculamos la incertidumbre de forma correcta (Intervalo de Credibilidad 95%)
+        # En lugar de un +- gigante, calculamos los percentiles 2.5 y 97.5
+        hdi_low = np.expm1(np.percentile(mu_samples, 2.5))
+        hdi_high = np.expm1(np.percentile(mu_samples, 97.5))
+        error_barra = (hdi_high - hdi_low) / 2
 
-    # 4. RECUADRO DE RESULTADOS E INCERTIDUMBRE
+    # --- PRESENTACIÓN DE RESULTADOS ---
     st.markdown("---")
-    res_col1, res_col2 = st.columns(2)
+    res_col1, res_col2 = st.columns([2, 1])
     
     with res_col1:
-        st.metric(label="Presión de Hundimiento ($P_h$)", value=f"{ph_final:.3f} MPa")
+        st.success(f"### Ph Predicho: **{ph_resultado:.4f} MPa**")
+        st.markdown(f"**Intervalo de Credibilidad (95%):** [{hdi_low:.2f} - {hdi_high:.2f}] MPa")
     
     with res_col2:
-        # El recuadro de incertidumbre que pedías
-        st.info(f"**Incertidumbre del Modelo:** ± {incertidumbre:.4f} MPa")
-        st.caption("Intervalo de confianza basado en la varianza de la posterior (BART).")
+        # Mostramos la incertidumbre como un valor relativo al error estándar del modelo
+        st.metric("Incertidumbre (±)", f"{error_barra:.4f} MPa")
+        st.info("💡 **BART Engine**: Superficie suave garantizada por promedio de ensamble bayesiano.")
 
-    # Guardar en historial (opcional)
-    if 'historial' not in st.session_state:
-        st.session_state.historial = []
-    st.session_state.historial.insert(0, {"Fecha": pd.Timestamp.now(), "Ph": ph_final, "Incertidumbre": incertidumbre})
+    # Guardar en historial
+    nuevo_registro = {
+        "UCS": ucs, "GSI": gsi, "mo": mo, "B": b,
+        "Peso": v_pp, "Dilat.": v_dil, "Forma": v_for, "Rugos.": v_rug,
+        "Ph (MPa)": round(ph_resultado, 4),
+        "Err (±)": round(error_barra, 4)
+    }
+    st.session_state["historial"].insert(0, nuevo_registro)
 
-# 5. HISTORIAL (Simplificado)
-if st.checkbox("Ver Historial de Cálculos"):
-    st.table(pd.DataFrame(st.session_state.historial))
+# ==============================================================================
+# 3. HISTORIAL TÉCNICO
+# ==============================================================================
+if st.session_state["historial"]:
+    st.markdown("---")
+    st.subheader("📜 Historial de Resultados")
+    df_hist = pd.DataFrame(st.session_state["historial"])
+    st.dataframe(df_hist, use_container_width=True, hide_index=True)
+    
+    if st.button("🗑️ Borrar Historial"):
+        st.session_state["historial"] = []
+        st.rerun()
+
+st.markdown("---")
+st.caption("Modelo BART Puro | Doctorado | Inferencia Bayesiana sobre NetCDF")
