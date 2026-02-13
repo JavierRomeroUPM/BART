@@ -1,5 +1,9 @@
 streamlit
 pandas
 numpy
-scikit-learn
-openpyxl
+pymc-bart
+arviz
+netCDF4
+h5netcdf
+xarray
+matplotlib
