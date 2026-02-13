@@ -4,19 +4,35 @@ import numpy as np
 import arviz as az
 import pymc_bart as pmb
 
-# Configuración profesional
+# ==============================================================================
+# 1. INICIALIZACIÓN DEL ESTADO (DEBE IR ANTES QUE NADA)
+# ==============================================================================
+if "historial" not in st.session_state:
+    st.session_state["historial"] = []
+
+# ==============================================================================
+# 2. CONFIGURACIÓN Y CARGA DEL MOTOR (.NC)
+# ==============================================================================
 st.set_page_config(page_title="Simulador Ph BART - Doctorado", layout="wide")
 
 @st.cache_resource
 def load_engine():
+    # Asegúrate de que este nombre sea EXACTO al de GitHub
     return az.from_netcdf("modelo_bart_final.nc")
 
-idata = load_engine()
+try:
+    idata = load_engine()
+except Exception as e:
+    st.error(f"❌ Error al cargar el motor bayesiano: {e}")
+    st.info("Comprueba que 'modelo_bart_final.nc' esté en la raíz de tu repositorio de GitHub.")
+    st.stop()
 
-st.title("🚀 Predictor Ph - Motor Bayesiano de Alta Fidelidad")
-st.markdown("Inferencia BART: Transiciones suaves y gestión de incertidumbre científica.")
+# ==============================================================================
+# 3. INTERFAZ DE USUARIO (TU MÁSCARA)
+# ==============================================================================
+st.title("🚀 Predictor Ph - Motor Bayesiano BART")
+st.markdown("Inferencia mediante árboles aditivos bayesianos para superficies de respuesta continuas.")
 
-# --- FORMULARIO CON TU MÁSCARA ---
 with st.form("main_form"):
     col1, col2 = st.columns(2)
     
@@ -36,46 +52,64 @@ with st.form("main_form"):
 
     submit = st.form_submit_button("🎯 CALCULAR PREDICCIÓN", use_container_width=True)
 
+# ==============================================================================
+# 4. LÓGICA DE CÁLCULO
+# ==============================================================================
 if submit:
     # Mapeo numérico
-    pp_val = 1 if v_pp == "Con Peso" else 0
-    dil_val = 1 if v_dil == "Asociada" else 0
-    for_val = 1 if v_for == "Axisimétrica" else 0
-    rug_val = 1 if v_rug == "Rugoso" else 0
+    pp_val = 1.0 if v_pp == "Con Peso" else 0.0
+    dil_val = 1.0 if v_dil == "Asociada" else 0.0
+    for_val = 1.0 if v_for == "Axisimétrica" else 0.0
+    rug_val = 1.0 if v_rug == "Rugoso" else 0.0
     
-    # VECTOR DE ENTRADA (ORDEN IDÉNTICO A TU IMAGEN)
-    # 0:mo, 1:B, 2:UCS, 3:GSI, 4:PP, 5:Dil, 6:Form, 7:Rug
+    # Vector: mo, B, UCS, GSI, PP, Dil, Form, Rug (Orden según tu imagen)
     vec = [mo, b, ucs, gsi, pp_val, dil_val, for_val, rug_val]
     
-    with st.spinner("Consultando motor bayesiano..."):
-        mu_samples = idata.posterior["mu"]
+    with st.spinner("Realizando inferencia bayesiana..."):
+        # Extraemos muestras de la posterior y transformamos a escala real
+        # Hacemos el expm1 sobre todas las muestras ANTES de calcular estadísticas
+        mu_real_scale = np.expm1(idata.posterior["mu"].values)
         
-        # Usamos la mediana para una predicción robusta
-        ph_log_pred = np.median(mu_samples)
-        ph_resultado = np.expm1(ph_log_pred)
+        # Predicción central (Mediana, más estable ante colas largas)
+        ph_resultado = np.median(mu_real_scale)
         
-        # Incertidumbre: Rango intercuartílico (más estable en geotecnia)
-        low_p = np.percentile(mu_samples, 25)
-        high_p = np.percentile(mu_samples, 75)
-        hdi_low = np.expm1(low_p)
-        hdi_high = np.expm1(high_p)
-        error_barra = (hdi_high - hdi_low) / 2
+        # Incertidumbre real (HDI 95%)
+        hdi_low = np.percentile(mu_real_scale, 2.5)
+        hdi_high = np.percentile(mu_real_scale, 97.5)
+        error_std = (hdi_high - hdi_low) / 2
 
-    # --- RESULTADOS ---
+    # Presentación
     st.markdown("---")
     res_col1, res_col2 = st.columns([2, 1])
     
     with res_col1:
         st.success(f"### Ph Predicho: **{ph_resultado:.4f} MPa**")
-        st.write(f"**Intervalo de Confianza (BART):** [{hdi_low:.2f} - {hdi_high:.2f}] MPa")
+        st.write(f"**Intervalo de Credibilidad (95%):** [{hdi_low:.2f} - {hdi_high:.2f}] MPa")
     
     with res_col2:
-        st.metric("Incertidumbre", f"± {error_barra:.4f} MPa")
-        st.info("💡 Transición suave garantizada.")
+        st.metric("Incertidumbre", f"± {error_std:.4f} MPa")
 
-    # Historial
-    if "historial" not in st.session_state: st.session_state["historial"] = []
-    st.session_state["historial"].insert(0, {"mo": mo, "B": b, "UCS": ucs, "GSI": gsi, "Ph": round(ph_resultado, 4)})
+    # Guardar en historial
+    nuevo_registro = {
+        "UCS": ucs, "GSI": gsi, "mo": mo, "B": b,
+        "Peso": v_pp, "Dilat.": v_dil, "Forma": v_for, "Rugos.": v_rug,
+        "Ph (MPa)": round(ph_resultado, 4),
+        "Incertidumbre (±)": round(error_std, 4)
+    }
+    st.session_state["historial"].insert(0, nuevo_registro)
 
+# ==============================================================================
+# 5. MOSTRAR HISTORIAL (SEGURO ANTE REINICIOS)
+# ==============================================================================
 if st.session_state["historial"]:
-    st.table(pd.DataFrame(st.session_state["historial"]))
+    st.markdown("---")
+    st.subheader("📜 Historial de Resultados")
+    df_hist = pd.DataFrame(st.session_state["historial"])
+    st.dataframe(df_hist, use_container_width=True, hide_index=True)
+    
+    if st.button("🗑️ Borrar Historial"):
+        st.session_state["historial"] = []
+        st.rerun()
+
+st.markdown("---")
+st.caption("BART Engine | Doctorado | Inferencia Bayesiana sobre NetCDF")
